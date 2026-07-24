@@ -1,40 +1,38 @@
-# reset_udahub.py
+"""Shared utilities for UDA-Hub: DB helpers, structured logger, memory utilities, ticket parser."""
+
+import json
 import os
+from datetime import datetime, timezone
+from contextlib import contextmanager
+
 from sqlalchemy import create_engine, Engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
-from contextlib import contextmanager
-from langchain_core.messages import (
-    SystemMessage,
-    HumanMessage, 
-)
+from langchain_core.messages import SystemMessage, HumanMessage
 from langgraph.graph.state import CompiledStateGraph
 
 
 Base = declarative_base()
 
-def reset_db(db_path: str, echo: bool = True):
-    """Drops the existing udahub.db file and recreates all tables."""
 
-    # Remove the file if it exists
+def reset_db(db_path: str, echo: bool = True):
+    """Drop the existing SQLite DB file and recreate all tables."""
     if os.path.exists(db_path):
         os.remove(db_path)
-        print(f"✅ Removed existing {db_path}")
 
-    # Create a new engine and recreate tables
     engine = create_engine(f"sqlite:///{db_path}", echo=echo)
     Base.metadata.create_all(engine)
-    print(f"✅ Recreated {db_path} with fresh schema")
 
 
 @contextmanager
 def get_session(engine: Engine):
+    """Context manager for a SQLAlchemy session with auto-commit/rollback."""
     Session = sessionmaker(bind=engine)
     session = Session()
     try:
         yield session
         session.commit()
-    except:
+    except Exception:
         session.rollback()
         raise
     finally:
@@ -48,27 +46,118 @@ def model_to_dict(instance):
         for column in instance.__table__.columns
     }
 
-def chat_interface(agent:CompiledStateGraph, ticket_id:str):
-    is_first_iteration = False
-    messages = [SystemMessage(content = f"ThreadId: {ticket_id}")]
+
+def log_agent_step(agent: str, action: str, details: dict, ticket_id: str = ""):
+    """Emit a structured JSON log line for an agent step.
+
+    Args:
+        agent: Name of the agent or node.
+        action: Action being performed (e.g., classify_ticket, kb_search).
+        details: Dict with action-specific details.
+        ticket_id: Optional ticket identifier for correlation.
+    """
+    log_entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "agent": agent,
+        "action": action,
+        "ticket_id": ticket_id,
+        "details": details,
+    }
+    print(json.dumps(log_entry, default=str))
+
+
+def parse_ticket_input(raw_text: str) -> dict:
+    """Parse raw user input into ticket_text and optionally extract user_email.
+
+    Args:
+        raw_text: The raw input string from the user.
+
+    Returns:
+        dict with keys ticket_text and user_email.
+    """
+    import re
+    email_pattern = r'[\w\.-]+@[\w\.-]+\.\w+'
+    emails = re.findall(email_pattern, raw_text)
+
+    ticket_text = raw_text.strip()
+    user_email = emails[0] if emails else "unknown@email.com"
+
+    return {
+        "ticket_text": ticket_text,
+        "user_email": user_email,
+    }
+
+
+def chat_interface(agent: CompiledStateGraph, ticket_id: str):
+    """Interactive chat loop using the compiled agent graph.
+
+    Args:
+        agent: Compiled LangGraph state graph.
+        ticket_id: Thread/ticket identifier for checkpointing.
+
+    Usage:
+        from utils import chat_interface
+        from agentic.workflow import compile_graph
+        graph = compile_graph()
+        chat_interface(graph, "ticket-123")
+    """
+    print(f"\n--- UDA-Hub Customer Support Agent ---")
+    print(f"Session: {ticket_id}")
+    print("Type your ticket or question. Type 'quit', 'exit', or 'q' to end.\n")
+
+    first_message = ["supervisor_node"]
+
     while True:
-        user_input = input("User: ")
-        print("User:", user_input)
+        try:
+            user_input = input("User: ")
+        except (EOFError, KeyboardInterrupt):
+            print("\nGoodbye!")
+            break
+
         if user_input.lower() in ["quit", "exit", "q"]:
             print("Assistant: Goodbye!")
             break
-        messages = [HumanMessage(content=user_input)]
-        if is_first_iteration:
-            messages.append(HumanMessage(content=user_input))
-        trigger = {
-            "messages": messages
+
+        parsed = parse_ticket_input(user_input)
+
+        initial_state = {
+            "ticket_id": ticket_id,
+            "ticket_text": parsed["ticket_text"],
+            "user_email": parsed["user_email"],
+            "classification": {},
+            "resolution": {},
+            "escalation": {},
+            "tool_results": [],
+            "memory_context": [],
+            "agent_trace": [],
+            "messages": [HumanMessage(content=parsed["ticket_text"])],
         }
+
         config = {
             "configurable": {
                 "thread_id": ticket_id,
             }
         }
-        
-        result = agent.invoke(input=trigger, config=config)
-        print("Assistant:", result["messages"][-1].content)
-        is_first_iteration = False
+
+        result = agent.invoke(input=initial_state, config=config)
+
+        messages = result.get("messages", [])
+        agent_trace = result.get("agent_trace", [])
+
+        if messages:
+            last_msg = messages[-1]
+            content = last_msg.content if hasattr(last_msg, "content") else str(last_msg)
+            print(f"Assistant: {content}")
+        else:
+            print("Assistant: No response generated.")
+
+        resolution = result.get("resolution", {})
+        escalation = result.get("escalation", {})
+
+        if resolution and resolution.get("status") == "resolved":
+            print(f"[Resolved - confidence: {resolution.get('confidence', 0):.2f}]")
+        elif escalation and escalation.get("reason"):
+            print(f"[Escalated - priority: {escalation.get('priority', 'unknown')}]")
+
+        trace_str = " -> ".join(agent_trace) if agent_trace else "(trace not recorded)"
+        print(f"[Trace: {trace_str}]\n")

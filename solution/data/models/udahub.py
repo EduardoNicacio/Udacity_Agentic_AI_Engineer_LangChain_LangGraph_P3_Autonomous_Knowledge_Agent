@@ -3,6 +3,7 @@ from sqlalchemy import (
     Column,
     String,
     Text,
+    Float,
     DateTime,
     Enum,
     ForeignKey,
@@ -121,3 +122,36 @@ class Knowledge(Base):
 
     def __repr__(self):
         return f"<Knowledge(article_id='{self.article_id}', title='{self.title}')>"
+
+
+class ConversationMemory(Base):
+    __tablename__ = 'conversation_memory'
+    memory_id = Column(String, primary_key=True)
+    account_id = Column(String, ForeignKey('accounts.account_id'), nullable=False)
+    ticket_id = Column(String, ForeignKey('tickets.ticket_id'), nullable=False)
+    summary = Column(Text, nullable=False)
+    embedding = Column(Text)
+    category = Column(String)
+    resolution_type = Column(String)
+    created_at = Column(DateTime, default=func.now())
+
+    account = relationship("Account")
+    ticket = relationship("Ticket")
+
+    def __repr__(self):
+        return f"<ConversationMemory(memory_id='{self.memory_id}', category='{self.category}', resolution_type='{self.resolution_type}')>"
+
+
+class RefundAction(Base):
+    __tablename__ = 'refund_actions'
+    refund_id = Column(String, primary_key=True)
+    ticket_id = Column(String, ForeignKey('tickets.ticket_id'), nullable=False)
+    amount = Column(Float, nullable=False)
+    reason = Column(Text)
+    status = Column(String, nullable=False)
+    processed_at = Column(DateTime, default=func.now())
+
+    ticket = relationship("Ticket")
+
+    def __repr__(self):
+        return f"<RefundAction(refund_id='{self.refund_id}', ticket_id='{self.ticket_id}', amount={self.amount}, status='{self.status}')>"
