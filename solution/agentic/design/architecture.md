@@ -63,6 +63,7 @@ graph TD
 | **LLM** | Primary - uses structured output parsing |
 
 **Classification categories:**
+
 - `billing` - charges, refunds, payment issues
 - `account` - login, password, profile, email changes
 - `technical` - app crashes, QR code issues, streaming problems
@@ -71,6 +72,7 @@ graph TD
 - `onboarding` - getting started, app setup, first use
 
 **Urgency levels:**
+
 - `high` - financial loss, account lockout, data breach keywords
 - `medium` - subscription changes, technical issues with workaround
 - `low` - how-to questions, feature inquiries, general info
