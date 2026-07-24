@@ -13,38 +13,57 @@ Node functions:
 """
 
 import asyncio
+import os
+from pathlib import Path
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import AIMessage
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_mcp_adapters.tools import load_mcp_tools
+from langchain_mcp_adapters.client import MultiServerMCPClient
+from langchain_mcp_adapters.sessions import StdioConnection
 from utils import log_agent_step
 
 
-import os
 _MEMORY_SERVER_PATH = os.path.join(os.path.dirname(__file__), "..", "tools", "memory_tool.py")
 _MEMORY_SERVER_PATH = os.path.normpath(_MEMORY_SERVER_PATH)
+_SOLUTION_DIR = str(Path(__file__).resolve().parent.parent.parent)
 
 
 def _load_memory_tools() -> list:
     """Load memory MCP tools via langchain-mcp-adapters."""
     async def _load():
-        tools = await load_mcp_tools({
-            "memory_tool": {
-                "transport": "stdio",
-                "command": "python",
-                "args": [_MEMORY_SERVER_PATH],
-            }
+        env = os.environ.copy()
+        env['PYTHONPATH'] = _SOLUTION_DIR
+        client = MultiServerMCPClient({
+            "memory_tool": StdioConnection(
+                transport="stdio",
+                command="python",
+                args=[_MEMORY_SERVER_PATH],
+                cwd=_SOLUTION_DIR,
+                env=env,
+            ),
         })
-        return tools
+        return await client.get_tools()
 
-    try:
-        loop = asyncio.get_running_loop()
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor() as pool:
-            future = pool.submit(asyncio.run, _load())
-            return future.result(timeout=30)
-    except RuntimeError:
-        return asyncio.run(_load())
+    import threading
+    result = [None]
+    exception = [None]
+
+    def _target():
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            result[0] = loop.run_until_complete(_load())
+            loop.close()
+        except Exception as e:
+            exception[0] = e
+
+    t = threading.Thread(target=_target, daemon=True)
+    t.start()
+    t.join(timeout=30)
+
+    if exception[0]:
+        raise exception[0]
+    return result[0] if result[0] is not None else []
 
 
 _MEMORY_TOOLS = None
@@ -56,8 +75,24 @@ def _get_memory_tools() -> list:
         try:
             _MEMORY_TOOLS = _load_memory_tools()
         except Exception:
-            _MEMORY_TOOLS = []
+            try:
+                from agentic.tools.direct_tools import get_read_memory_tool, get_write_memory_tool
+                _MEMORY_TOOLS = [
+                    _DirectTool("read_memory", get_read_memory_tool()),
+                    _DirectTool("write_memory", get_write_memory_tool()),
+                ]
+            except Exception:
+                _MEMORY_TOOLS = []
     return _MEMORY_TOOLS
+
+
+class _DirectTool:
+    """Wrapper to make a direct function callable like an MCP tool."""
+    def __init__(self, name, func):
+        self.name = name
+        self._func = func
+    def invoke(self, input):
+        return self._func(**input)
 
 
 FINAL_PROMPT = ChatPromptTemplate.from_messages([

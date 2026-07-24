@@ -11,7 +11,9 @@ Node function:
 
 import asyncio
 import os
-from langchain_mcp_adapters.tools import load_mcp_tools
+from pathlib import Path
+from langchain_mcp_adapters.client import MultiServerMCPClient
+from langchain_mcp_adapters.sessions import StdioConnection
 from utils import log_agent_step
 
 
@@ -19,36 +21,64 @@ _ACCOUNT_LOOKUP_PATH = os.path.join(os.path.dirname(__file__), "..", "tools", "a
 _REFUND_PATH = os.path.join(os.path.dirname(__file__), "..", "tools", "refund_tool.py")
 _ACCOUNT_LOOKUP_PATH = os.path.normpath(_ACCOUNT_LOOKUP_PATH)
 _REFUND_PATH = os.path.normpath(_REFUND_PATH)
+_SOLUTION_DIR = str(Path(__file__).resolve().parent.parent.parent)
 
 
 def _load_support_tools() -> list:
     """Load account_lookup and refund MCP tools via langchain-mcp-adapters."""
     async def _load():
-        tools = await load_mcp_tools({
-            "account_lookup_tool": {
-                "transport": "stdio",
-                "command": "python",
-                "args": [_ACCOUNT_LOOKUP_PATH],
-            },
-            "refund_tool": {
-                "transport": "stdio",
-                "command": "python",
-                "args": [_REFUND_PATH],
-            },
+        env = os.environ.copy()
+        env['PYTHONPATH'] = _SOLUTION_DIR
+        client = MultiServerMCPClient({
+            "account_lookup_tool": StdioConnection(
+                transport="stdio",
+                command="python",
+                args=[_ACCOUNT_LOOKUP_PATH],
+                cwd=_SOLUTION_DIR,
+                env=env,
+            ),
+            "refund_tool": StdioConnection(
+                transport="stdio",
+                command="python",
+                args=[_REFUND_PATH],
+                cwd=_SOLUTION_DIR,
+                env=env,
+            ),
         })
-        return tools
+        return await client.get_tools()
 
-    try:
-        loop = asyncio.get_running_loop()
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor() as pool:
-            future = pool.submit(asyncio.run, _load())
-            return future.result(timeout=30)
-    except RuntimeError:
-        return asyncio.run(_load())
+    import threading
+    result = [None]
+    exception = [None]
+
+    def _target():
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            result[0] = loop.run_until_complete(_load())
+            loop.close()
+        except Exception as e:
+            exception[0] = e
+
+    t = threading.Thread(target=_target, daemon=True)
+    t.start()
+    t.join(timeout=30)
+
+    if exception[0]:
+        raise exception[0]
+    return result[0] if result[0] is not None else []
 
 
 _SUPPORT_TOOLS = None
+
+
+class _DirectTool:
+    """Wrapper to make a direct function callable like an MCP tool."""
+    def __init__(self, name, func):
+        self.name = name
+        self._func = func
+    def invoke(self, input):
+        return self._func(**input)
 
 
 def _get_support_tools() -> list:
@@ -57,7 +87,14 @@ def _get_support_tools() -> list:
         try:
             _SUPPORT_TOOLS = _load_support_tools()
         except Exception:
-            _SUPPORT_TOOLS = []
+            try:
+                from agentic.tools.direct_tools import get_account_lookup_tool, get_refund_tool
+                _SUPPORT_TOOLS = [
+                    _DirectTool("account_lookup", get_account_lookup_tool()),
+                    _DirectTool("process_refund", get_refund_tool()),
+                ]
+            except Exception:
+                _SUPPORT_TOOLS = []
     return _SUPPORT_TOOLS
 
 

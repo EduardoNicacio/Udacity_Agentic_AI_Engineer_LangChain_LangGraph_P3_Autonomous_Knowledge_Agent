@@ -27,9 +27,13 @@ _MOCK_ARTICLES = [
 ]
 
 
-def _make_mock_llm_response(response_text: str, confidence: float):
-    mock_result = MagicMock()
-    mock_result.content = f'{{"response": "{response_text}", "confidence": {confidence}}}'
+def _make_mock_llm_response(response_text: str, confidence: float, selected_article: str = ""):
+    if selected_article:
+        mock_result = MagicMock()
+        mock_result.content = f'{{"selected_article": "{selected_article}", "response": "{response_text}", "confidence": {confidence}}}'
+    else:
+        mock_result = MagicMock()
+        mock_result.content = f'{{"response": "{response_text}", "confidence": {confidence}}}'
     return mock_result
 
 
