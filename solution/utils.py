@@ -91,6 +91,9 @@ def parse_ticket_input(raw_text: str) -> dict:
 def chat_interface(agent: CompiledStateGraph, ticket_id: str):
     """Interactive chat loop using the compiled agent graph.
 
+    Preserves conversation state across turns using the thread_id checkpointer.
+    Each turn appends new messages to the existing state rather than resetting it.
+
     Args:
         agent: Compiled LangGraph state graph.
         ticket_id: Thread/ticket identifier for checkpointing.
@@ -105,7 +108,8 @@ def chat_interface(agent: CompiledStateGraph, ticket_id: str):
     print(f"Session: {ticket_id}")
     print("Type your ticket or question. Type 'quit', 'exit', or 'q' to end.\n")
 
-    first_message = ["supervisor_node"]
+    thread_counter = 0
+    current_thread_id = ticket_id
 
     while True:
         try:
@@ -119,11 +123,17 @@ def chat_interface(agent: CompiledStateGraph, ticket_id: str):
             break
 
         parsed = parse_ticket_input(user_input)
+        thread_counter += 1
+        current_thread_id = f"{ticket_id}-{thread_counter}"
 
-        initial_state = {
-            "ticket_id": ticket_id,
+        # For multi-turn: on first turn, provide full initial state;
+        # on subsequent turns, the checkpointer (via thread_id) preserves prior state.
+        # We only need to supply the new message and ticket fields.
+        state_update = {
+            "ticket_id": current_thread_id,
             "ticket_text": parsed["ticket_text"],
             "user_email": parsed["user_email"],
+            "customer_id": parsed["user_email"],
             "classification": {},
             "resolution": {},
             "escalation": {},
@@ -135,11 +145,11 @@ def chat_interface(agent: CompiledStateGraph, ticket_id: str):
 
         config = {
             "configurable": {
-                "thread_id": ticket_id,
+                "thread_id": current_thread_id,
             }
         }
 
-        result = agent.invoke(input=initial_state, config=config)
+        result = agent.invoke(input=state_update, config=config)
 
         messages = result.get("messages", [])
         agent_trace = result.get("agent_trace", [])

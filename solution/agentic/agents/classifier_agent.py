@@ -19,6 +19,7 @@ Output (on state):
 from pydantic import BaseModel, Field
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
+from utils import log_agent_step
 
 
 class ClassificationOutput(BaseModel):
@@ -75,20 +76,34 @@ def classifier_node(state: dict) -> dict:
         structured_llm = llm.with_structured_output(ClassificationOutput)
         chain = CLASSIFIER_PROMPT | structured_llm
         result = chain.invoke({"ticket_text": ticket_text, "user_email": user_email})
+        classification = {
+            "category": result.category,
+            "urgency": result.urgency,
+            "routing_label": result.routing_label,
+        }
+        log_agent_step(
+            agent="classifier_node",
+            action="classify_ticket",
+            details=classification,
+            ticket_id=state.get("ticket_id", ""),
+        )
         return {
-            "classification": {
-                "category": result.category,
-                "urgency": result.urgency,
-                "routing_label": result.routing_label,
-            },
+            "classification": classification,
             "agent_trace": result_trace,
         }
     except Exception:
+        fallback = {
+            "category": "unknown",
+            "urgency": "low",
+            "routing_label": "escalation",
+        }
+        log_agent_step(
+            agent="classifier_node",
+            action="classify_ticket_fallback",
+            details=fallback,
+            ticket_id=state.get("ticket_id", ""),
+        )
         return {
-            "classification": {
-                "category": "unknown",
-                "urgency": "low",
-                "routing_label": "escalation",
-            },
+            "classification": fallback,
             "agent_trace": result_trace,
         }

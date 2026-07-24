@@ -2,7 +2,7 @@
 
 ## System Overview
 
-UDA-Hub is a LangGraph-powered multi-agent decision system that processes customer support tickets through a pipeline of specialized agents. Each ticket flows through classification, resolution attempt (with RAG), and either resolution or escalation - with long-term memory accumulating across sessions.
+UDA-Hub is a LangGraph-powered multi-agent decision system that processes customer support tickets through a pipeline of specialized agents. Each ticket flows through classification, support tool invocation, resolution attempt (with RAG), and either resolution or escalation - with long-term memory accumulating across sessions and scoped to individual customers.
 
 The system is designed for CultPass, a cultural experience subscription platform, but is architected to be account-agnostic via the UDA-Hub multi-tenant data model.
 
@@ -12,29 +12,36 @@ The system is designed for CultPass, a cultural experience subscription platform
 graph TD
     START((START)) --> SUPERVISOR[supervisor_node<br/>Entry point + state init]
     SUPERVISOR --> CLASSIFIER[classifier_agent<br/>Category + urgency + routing]
-    CLASSIFIER --> RESOLVER[resolver_agent<br/>RAG lookup + confidence scoring]
-    RESOLVER --> ROUTE{route_after_resolver<br/>confidence >= 0.6?}
-    ROUTE -->|resolve| SUPERVISOR_FINAL[supervisor_final_node<br/>Compose response + write memory]
-    ROUTE -->|escalate| ESCALATION[escalation_agent<br/>Summarize for human handoff]
+    CLASSIFIER --> ROUTE_LABEL{route_by_label<br/>routing_label?}
+    ROUTE_LABEL -->|resolver| SUPPORT_TOOLS[support_tools_node<br/>account_lookup + refund]
+    ROUTE_LABEL -->|escalation| ESCALATION[escalation_agent<br/>Summarize for human handoff]
+    SUPPORT_TOOLS --> RESOLVER[resolver_agent<br/>RAG lookup + confidence scoring]
+    RESOLVER --> ROUTE_CONF{route_after_resolver<br/>confidence >= 0.6?}
+    ROUTE_CONF -->|resolve| SUPERVISOR_FINAL[supervisor_final_node<br/>Compose response + write memory]
+    ROUTE_CONF -->|escalate| ESCALATION
     ESCALATION --> SUPERVISOR_FINAL
     SUPERVISOR_FINAL --> END((END))
 
     style SUPERVISOR fill:#4a90d9,color:#fff
     style CLASSIFIER fill:#f5a623,color:#fff
+    style SUPPORT_TOOLS fill:#50e3c2,color:#fff
     style RESOLVER fill:#7ed321,color:#fff
     style ESCALATION fill:#d0021b,color:#fff
     style SUPERVISOR_FINAL fill:#4a90d9,color:#fff
-    style ROUTE fill:#9b59b6,color:#fff
+    style ROUTE_LABEL fill:#9b59b6,color:#fff
+    style ROUTE_CONF fill:#9b59b6,color:#fff
 ```
 
 ### Node Descriptions
 
-1. **supervisor_node** - Entry point. Receives raw ticket input, initializes state, loads long-term memory from `ConversationMemory` table via keyword/category matching.
-2. **classifier_agent** - Reads ticket text + metadata. Uses LLM structured output to assign category, urgency, and routing label.
-3. **resolver_agent** - Performs RAG against the Knowledge base (keyword/tag search). Selects best matching article, generates response, computes confidence score (0.0–1.0).
-4. **route_after_resolver** - Conditional edge. If confidence >= 0.6 -> resolve. If < 0.6 -> escalate.
-5. **escalation_agent** - Generates structured escalation summary for human handoff when resolver confidence is low.
-6. **supervisor_final_node** - Composes the final assistant response from resolution or escalation data. Writes long-term memory record. Appends to agent trace.
+1. **supervisor_node** - Entry point. Receives raw ticket input, initializes state, loads customer-scoped long-term memory from `ConversationMemory` table via keyword/category matching.
+2. **classifier_agent** - Reads ticket text + metadata. Uses LLM structured output to assign category, urgency, and routing label. Logs classification decision.
+3. **route_by_label** - Conditional edge after classifier. If routing_label is "escalation", skip support_tools and resolver, go directly to escalation. If "resolver", proceed to support_tools.
+4. **support_tools_node** - Invokes `account_lookup` (for billing/account tickets) and `process_refund` (for refund requests) MCP tools. Records tool results in state.
+5. **resolver_agent** - Performs RAG against the Knowledge base (keyword/tag search with stemming and phrase matching). Selects best matching article, generates response, computes confidence score (0.0-1.0).
+6. **route_after_resolver** - Conditional edge. If confidence >= 0.6 -> resolve. If < 0.6 -> escalate.
+7. **escalation_agent** - Generates structured escalation summary for human handoff when routing_label is "escalation" or resolver confidence is low.
+8. **supervisor_final_node** - Composes the final assistant response from resolution or escalation data. Writes customer-scoped long-term memory record. Appends to agent trace.
 
 ## Agent Specifications
 
@@ -44,10 +51,10 @@ graph TD
 |---|---|
 | **File** | `solution/agentic/agents/supervisor_agent.py` |
 | **Node functions** | `supervisor_node` (entry), `supervisor_final_node` (exit) |
-| **Role** | Entry point that initializes state and loads long-term memory. Final node that composes the response and persists memory. |
-| **Inputs** | Raw ticket text, user email, thread_id |
+| **Role** | Entry point that initializes state and loads customer-scoped long-term memory. Final node that composes the response and persists memory. |
+| **Inputs** | Raw ticket text, user email, customer_id, thread_id |
 | **Outputs** | Populated `memory_context` (entry), final `messages` + `ConversationMemory` write (exit) |
-| **Tools** | None |
+| **Tools** | `read_memory`, `write_memory` (MCP, loaded via `langchain-mcp-adapters`) |
 | **LLM** | Used for composing final response only |
 
 ### ClassifierAgent
@@ -58,7 +65,7 @@ graph TD
 | **Node function** | `classifier_node` |
 | **Role** | Analyze ticket text + metadata to assign category, urgency, and routing label |
 | **Inputs** | `ticket_text`, `user_email`, `memory_context` |
-| **Outputs** | Updates `classification` in state |
+| **Outputs** | Updates `classification` in state: `{category, urgency, routing_label}` |
 | **Tools** | None |
 | **LLM** | Primary - uses structured output parsing |
 
@@ -77,6 +84,28 @@ graph TD
 - `medium` - subscription changes, technical issues with workaround
 - `low` - how-to questions, feature inquiries, general info
 
+**Routing labels:**
+
+- `resolver` - ticket can likely be answered from knowledge base
+- `escalation` - requires human intervention (financial disputes, security, account deletion)
+
+### SupportToolsAgent
+
+| Property | Value |
+|---|---|
+| **File** | `solution/agentic/agents/support_tools_agent.py` |
+| **Node function** | `support_tools_node` |
+| **Role** | Invoke account_lookup and refund MCP tools based on ticket classification and content |
+| **Inputs** | `ticket_text`, `classification`, `user_email`, `tool_results` |
+| **Outputs** | Appends to `tool_results` in state |
+| **Tools** | `account_lookup`, `process_refund` (MCP, loaded via `langchain-mcp-adapters`) |
+| **LLM** | None |
+
+**Tool invocation rules:**
+
+- For billing tickets with user_email: invoke `account_lookup`
+- For tickets mentioning "refund": invoke `process_refund`
+
 ### ResolverAgent
 
 | Property | Value |
@@ -84,7 +113,7 @@ graph TD
 | **File** | `solution/agentic/agents/resolver_agent.py` |
 | **Node function** | `resolver_node` |
 | **Role** | Perform RAG against knowledge base, compute confidence, attempt resolution |
-| **Inputs** | `ticket_text`, `classification`, `memory_context` |
+| **Inputs** | `ticket_text`, `classification`, `memory_context`, `tool_results` |
 | **Outputs** | Updates `resolution` in state: `{status, article_id, article_title, response, confidence}` |
 | **Tools** | `kb_search` (MCP, loaded via `langchain-mcp-adapters`) |
 | **LLM** | Used for RAG response generation + confidence scoring |
@@ -103,17 +132,32 @@ graph TD
 
 ## Routing Decision Table
 
-| Ticket Characteristic | Category | Urgency | Route |
-|---|---|---|---|
-| "I was charged twice" | billing | high | resolver -> likely escalate |
-| "Can't log in, forgot password" | account | medium | resolver -> resolve |
-| "App crashes when reserving" | technical | medium | resolver -> resolve if KB match |
-| "I want to upgrade to premium" | subscription | low | resolver -> resolve |
-| "How do I leave a review?" | content | low | resolver -> resolve |
-| "How do I get started?" | onboarding | low | resolver -> resolve |
-| "I want a full refund and to cancel" | billing | high | escalation |
-| "My account was hacked" | account | high | escalation |
-| Complex multi-issue tickets | mixed | high | resolver -> low confidence -> escalation |
+### After Classifier (route_by_label)
+
+| Routing Label | Next Node | Condition |
+|---|---|---|
+| `resolver` | support_tools_node | Ticket can be handled by KB + tools |
+| `escalation` | escalation_node | Requires human intervention |
+
+### After Resolver (route_after_resolver)
+
+| Confidence | Action | Meaning |
+|---|---|---|
+| >= 0.6 | resolve -> supervisor_final | Strong enough KB match |
+| < 0.6 | escalate -> escalation | Insufficient KB match |
+
+### Combined Routing Examples
+
+| Ticket Characteristic | Category | Urgency | Classifier Route | Confidence | Final Outcome |
+|---|---|---|---|---|---|
+| "How do I reserve an event?" | onboarding | low | resolver | 0.85 | Resolved |
+| "Can't log in, forgot password" | account | medium | resolver | 0.75 | Resolved |
+| "App crashes when reserving" | technical | medium | resolver | 0.80 | Resolved |
+| "I want to upgrade to premium" | subscription | low | resolver | 0.90 | Resolved |
+| "How do I leave a review?" | content | low | resolver | 0.70 | Resolved |
+| "I was charged twice" | billing | high | resolver | 0.40 | Escalated (low confidence) |
+| "I want a full refund and to cancel" | billing | high | escalation | - | Escalated (classifier) |
+| "My account was hacked" | account | high | escalation | - | Escalated (classifier) |
 
 ## Confidence Scoring Specification
 
@@ -136,20 +180,22 @@ The confidence score is assigned by the LLM in the ResolverAgent.
 |---|---|
 | **Storage** | LangGraph `MemorySaver` checkpointer |
 | **Scope** | Thread ID (ticket_id passed as thread_id) |
-| **Contents** | Message history, intermediate agent outputs |
+| **Contents** | Message history (append-only via `operator.add`), intermediate agent outputs |
 | **Access** | Automatic via state in workflow nodes |
 | **Lifetime** | Duration of one session |
+| **Multi-turn** | Each turn uses a unique thread_id; state is preserved via checkpointer |
 
 ### Long-Term Memory (Cross-Session)
 
 | Property | Value |
 |---|---|
 | **Storage** | `ConversationMemory` table in UDA-Hub SQLite DB |
-| **Schema** | memory_id, account_id, ticket_id, summary, embedding, category, resolution_type, created_at |
+| **Schema** | memory_id, account_id, **customer_id**, ticket_id, summary, embedding, category, resolution_type, created_at |
 | **Write trigger** | After successful resolution or escalation (in `supervisor_final_node`) |
 | **Read trigger** | At session start (in `supervisor_node`) |
-| **Retrieval method** | SQL LIKE queries on category + keyword overlap in summary |
-| **Limit** | Top 5 most relevant past interactions |
+| **Retrieval method** | SQL LIKE queries on category + keyword overlap in summary, scoped by customer_id |
+| **Customer scoping** | All reads/writes filtered by customer_id (= user_email) |
+| **Limit** | Top 5 most relevant past interactions for the customer |
 
 ## Logging Strategy
 
@@ -161,12 +207,14 @@ Every agent step emits a single JSON line to stdout.
 
 | Node | Actions Logged |
 |---|---|
-| `supervisor_node` | `ticket_received`, `memory_loaded` |
-| `classifier_node` | `classify_ticket` (category, urgency, routing) |
-| `resolver_node` | `kb_search`, `confidence_score`, `resolve_or_escalate` |
+| `supervisor_node` | `ticket_received` (ticket_id, memory_count) |
+| `classifier_node` | `classify_ticket` (category, urgency, routing_label) |
+| `support_tools_node` | `support_tools_invoked` (invoked tools, category, tool_results_count) |
+| `resolver_node` | `kb_search_resolved` (article_id, article_title, confidence, matches_found) |
 | `escalation_node` | `escalation_created` (priority, reason) |
-| `supervisor_final_node` | `response_composed`, `memory_written`, `session_complete` |
-| `route_after_resolver` | `routing_decision` |
+| `supervisor_final_node` | `session_complete` (resolution_type, category) |
+| `router` (classifier) | `classifier_routing` (routing_label) |
+| `router` (confidence) | `confidence_routing` (confidence, threshold, decision) |
 
 ## Tool Specifications
 
@@ -175,10 +223,11 @@ Every agent step emits a single JSON line to stdout.
 | Property | Value |
 |---|---|
 | **File** | `solution/agentic/tools/account_lookup_tool.py` |
-| **MCP Server** | `FastMCP("account_lookup")` |
+| **MCP Server** | `FastMCP("account_lookup_tool")` |
 | **Input** | `email` OR `user_id` |
 | **Output** | User + subscription info + open ticket count |
 | **DBs accessed** | `cultpass.db` + `udahub.db` |
+| **Invoked by** | `support_tools_node` for billing/account tickets |
 
 ### process_refund
 
@@ -189,6 +238,7 @@ Every agent step emits a single JSON line to stdout.
 | **Input** | `ticket_id`, `amount`, `reason` |
 | **Output** | Refund approval status + details |
 | **DBs accessed** | `udahub.db` |
+| **Invoked by** | `support_tools_node` for refund-related tickets |
 
 ### kb_search
 
@@ -197,9 +247,10 @@ Every agent step emits a single JSON line to stdout.
 | **File** | `solution/agentic/tools/kb_search_tool.py` |
 | **MCP Server** | `FastMCP("kb_search")` |
 | **Input** | `ticket_text`, `category`, `account_id` |
-| **Output** | List of matching Knowledge articles with scores (min score 4) |
+| **Output** | List of matching Knowledge articles with scores (min score 6) |
 | **DBs accessed** | `udahub.db` |
 | **Used by** | `resolver_agent` via `langchain-mcp-adapters` |
+| **Ranking** | Stemming, phrase matching, title/tag/content weighted scoring, category alignment |
 
 ### read_memory / write_memory
 
@@ -207,10 +258,12 @@ Every agent step emits a single JSON line to stdout.
 |---|---|
 | **File** | `solution/agentic/tools/memory_tool.py` |
 | **MCP Server** | `FastMCP("memory_tool")` |
-| **Input** | `category`, `ticket_text`, `limit`, `account_id` (read); `ticket_id`, `summary`, `category`, `resolution_type`, `account_id` (write) |
+| **Input (read)** | `category`, `ticket_text`, `limit`, `account_id`, **`customer_id`** |
+| **Input (write)** | `ticket_id`, `summary`, `category`, `resolution_type`, `account_id`, **`customer_id`** |
 | **Output** | List of memory records (read); write confirmation (write) |
 | **DBs accessed** | `udahub.db` |
 | **Used by** | `supervisor_agent` via `langchain-mcp-adapters` |
+| **Scoping** | All reads/writes filtered by customer_id |
 
 ## Folder Structure
 
@@ -222,6 +275,7 @@ solution/
 │   │   ├── classifier_agent.py
 │   │   ├── resolver_agent.py
 │   │   ├── escalation_agent.py
+│   │   ├── support_tools_agent.py
 │   │   └── supervisor_agent.py
 │   ├── design/
 │   │   └── architecture.md
@@ -247,9 +301,11 @@ solution/
 │   ├── test_classifier.py
 │   ├── test_resolver.py
 │   ├── test_tools.py
-│   └── test_workflow.py
+│   ├── test_workflow.py
+│   └── test_kb_search.py
 ├── 01_external_db_setup.ipynb
 ├── 02_core_db_setup.ipynb
+├── 03_agentic_app.ipynb
 ├── 03_agentic_app.py
 ├── utils.py
 ├── requirements.txt

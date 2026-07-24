@@ -19,14 +19,15 @@ _STOP_WORDS = {"the", "a", "an", "is", "was", "to", "for", "of", "in", "it", "on
 
 
 @mcp.tool()
-def read_memory(category: str, ticket_text: str, limit: int = 5, account_id: str = "cultpass") -> list[dict]:
-    """Read past conversation memory by category and keyword overlap.
+def read_memory(category: str, ticket_text: str, limit: int = 5, account_id: str = "cultpass", customer_id: str = "") -> list[dict]:
+    """Read past conversation memory by category and keyword overlap, scoped to a customer.
 
     Args:
         category: The ticket category to filter memories by.
         ticket_text: The current ticket text for keyword matching.
         limit: Maximum number of memories to return.
         account_id: The account ID to scope the search to.
+        customer_id: The customer (external user) ID to scope memory to.
 
     Returns:
         A list of matching memory records.
@@ -40,9 +41,15 @@ def read_memory(category: str, ticket_text: str, limit: int = 5, account_id: str
     memories = []
     try:
         with sessionmaker(bind=engine)() as session:
+            base_filters = [
+                udahub_models.ConversationMemory.account_id == account_id,
+            ]
+            if customer_id:
+                base_filters.append(udahub_models.ConversationMemory.customer_id == customer_id)
+
             if category and category != "unknown":
                 mems = session.query(udahub_models.ConversationMemory).filter(
-                    udahub_models.ConversationMemory.account_id == account_id,
+                    *base_filters,
                     udahub_models.ConversationMemory.category == category,
                 ).order_by(
                     udahub_models.ConversationMemory.created_at.desc()
@@ -50,6 +57,7 @@ def read_memory(category: str, ticket_text: str, limit: int = 5, account_id: str
                 for m in mems:
                     memories.append({
                         "memory_id": m.memory_id,
+                        "customer_id": m.customer_id,
                         "summary": m.summary,
                         "category": m.category,
                         "resolution_type": m.resolution_type,
@@ -59,7 +67,8 @@ def read_memory(category: str, ticket_text: str, limit: int = 5, account_id: str
             if not memories:
                 for kw in keywords:
                     mems = session.query(udahub_models.ConversationMemory).filter(
-                        udahub_models.ConversationMemory.summary.like(f"%{kw}%")
+                        *base_filters,
+                        udahub_models.ConversationMemory.summary.like(f"%{kw}%"),
                     ).order_by(
                         udahub_models.ConversationMemory.created_at.desc()
                     ).limit(limit).all()
@@ -67,6 +76,7 @@ def read_memory(category: str, ticket_text: str, limit: int = 5, account_id: str
                         for m in mems:
                             memories.append({
                                 "memory_id": m.memory_id,
+                                "customer_id": m.customer_id,
                                 "summary": m.summary,
                                 "category": m.category,
                                 "resolution_type": m.resolution_type,
@@ -86,6 +96,7 @@ def write_memory(
     category: str,
     resolution_type: str,
     account_id: str = "cultpass",
+    customer_id: str = "",
 ) -> dict:
     """Write a conversation memory record after resolution or escalation.
 
@@ -95,6 +106,7 @@ def write_memory(
         category: The ticket category.
         resolution_type: Either 'resolved' or 'escalated'.
         account_id: The account ID.
+        customer_id: The customer (external user) ID.
 
     Returns:
         A dict confirming the write operation.
@@ -106,6 +118,7 @@ def write_memory(
             memory = udahub_models.ConversationMemory(
                 memory_id=str(uuid4()),
                 account_id=account_id,
+                customer_id=customer_id,
                 ticket_id=ticket_id,
                 summary=summary,
                 category=category,

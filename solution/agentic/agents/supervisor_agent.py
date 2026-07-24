@@ -75,6 +75,7 @@ def supervisor_node(state: dict) -> dict:
     """Entry point: load long-term memory and prepare state."""
     ticket_text = state.get("ticket_text", "")
     ticket_id = state.get("ticket_id", "")
+    customer_id = state.get("customer_id", "")
 
     classification = state.get("classification", {})
     category = classification.get("category", "") if classification else ""
@@ -88,6 +89,7 @@ def supervisor_node(state: dict) -> dict:
                 "category": category or "unknown",
                 "ticket_text": ticket_text,
                 "limit": 5,
+                "customer_id": customer_id,
             })
             if not isinstance(memories, list):
                 memories = []
@@ -160,6 +162,7 @@ def supervisor_final_node(state: dict) -> dict:
                     "summary": summary,
                     "category": category,
                     "resolution_type": resolution_type,
+                    "customer_id": state.get("customer_id", ""),
                 })
             except Exception:
                 pass

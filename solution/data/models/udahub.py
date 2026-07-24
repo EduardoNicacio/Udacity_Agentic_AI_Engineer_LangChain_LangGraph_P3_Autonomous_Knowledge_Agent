@@ -128,6 +128,7 @@ class ConversationMemory(Base):
     __tablename__ = 'conversation_memory'
     memory_id = Column(String, primary_key=True)
     account_id = Column(String, ForeignKey('accounts.account_id'), nullable=False)
+    customer_id = Column(String, nullable=False, default='')
     ticket_id = Column(String, ForeignKey('tickets.ticket_id'), nullable=False)
     summary = Column(Text, nullable=False)
     embedding = Column(Text)
@@ -139,7 +140,7 @@ class ConversationMemory(Base):
     ticket = relationship("Ticket")
 
     def __repr__(self):
-        return f"<ConversationMemory(memory_id='{self.memory_id}', category='{self.category}', resolution_type='{self.resolution_type}')>"
+        return f"<ConversationMemory(memory_id='{self.memory_id}', customer_id='{self.customer_id}', category='{self.category}', resolution_type='{self.resolution_type}')>"
 
 
 class RefundAction(Base):

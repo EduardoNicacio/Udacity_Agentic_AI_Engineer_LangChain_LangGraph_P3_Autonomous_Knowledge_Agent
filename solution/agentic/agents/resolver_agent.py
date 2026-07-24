@@ -24,6 +24,7 @@ from pathlib import Path
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_mcp_adapters.tools import load_mcp_tools
+from utils import log_agent_step
 
 
 _BASE_DIR = Path(__file__).resolve().parent.parent.parent
@@ -122,7 +123,7 @@ def resolver_node(state: dict) -> dict:
         except Exception:
             matches = []
 
-    tool_results = state.get("tool_results", [])
+    tool_results = list(state.get("tool_results", []))
     tool_results.append({
         "tool": "kb_search",
         "matches_found": len(matches),
@@ -182,6 +183,18 @@ def resolver_node(state: dict) -> dict:
             "tool_results": tool_results,
             "agent_trace": result_trace,
         }
+
+    log_agent_step(
+        agent="resolver_node",
+        action="kb_search_resolved",
+        details={
+            "article_id": best.get("article_id", ""),
+            "article_title": best.get("title", ""),
+            "confidence": confidence,
+            "matches_found": len(matches),
+        },
+        ticket_id=state.get("ticket_id", ""),
+    )
 
     return {
         "resolution": {
