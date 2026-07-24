@@ -47,7 +47,7 @@ def process_refund(ticket_id: str, amount: float, reason: str = "") -> dict:
             udahub_models.TicketMetadata.ticket_id == ticket_id
         ).first()
 
-        if metadata and metadata.status != "open":
+        if metadata and metadata.status != "open": # type: ignore
             return {"error": f"Ticket {ticket_id} is already closed (status: {metadata.status})"}
 
         refund_id = str(uuid4())
@@ -65,7 +65,7 @@ def process_refund(ticket_id: str, amount: float, reason: str = "") -> dict:
         session.add(refund)
 
         if metadata:
-            metadata.status = "refunded"
+            metadata.status = "refunded" # type: ignore
 
         session.commit()
 

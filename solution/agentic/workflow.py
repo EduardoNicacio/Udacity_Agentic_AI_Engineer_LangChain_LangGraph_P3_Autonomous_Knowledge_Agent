@@ -83,11 +83,11 @@ def compile_graph() -> StateGraph:
     """
     workflow = StateGraph(AgentState)
 
-    workflow.add_node("supervisor", supervisor_node)
-    workflow.add_node("classifier", classifier_node)
-    workflow.add_node("resolver", resolver_node)
-    workflow.add_node("escalation", escalation_node)
-    workflow.add_node("supervisor_final", supervisor_final_node)
+    workflow.add_node("supervisor", supervisor_node)             # type: ignore
+    workflow.add_node("classifier", classifier_node)             # type: ignore
+    workflow.add_node("resolver", resolver_node)                 # type: ignore
+    workflow.add_node("escalation", escalation_node)             # type: ignore
+    workflow.add_node("supervisor_final", supervisor_final_node) # type: ignore
 
     workflow.set_entry_point("supervisor")
 
@@ -107,4 +107,4 @@ def compile_graph() -> StateGraph:
     workflow.add_edge("supervisor_final", END)
 
     checkpointer = MemorySaver()
-    return workflow.compile(checkpointer=checkpointer)
+    return workflow.compile(checkpointer=checkpointer) # type: ignore
